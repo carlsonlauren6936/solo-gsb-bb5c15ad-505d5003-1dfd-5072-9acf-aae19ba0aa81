@@ -288,6 +288,43 @@ tr.row-conflict:hover { background: #fdf4e3; }
 }
 .modal-ops { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 
+/* ---------- 延误推演 ---------- */
+.sim-card { margin-top: 16px; }
+.sim-body { padding: 4px 20px 18px; }
+.sim-controls { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+.sim-field label { display: block; font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
+.sim-field select, .sim-field input {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-family: inherit;
+  background: #fff;
+}
+.sim-field select { min-width: 280px; }
+.sim-field input { width: 160px; }
+.sim-field select:focus, .sim-field input:focus {
+  outline: 2px solid rgba(140, 74, 47, .35);
+  border-color: var(--primary);
+}
+.sim-ops { display: flex; gap: 8px; }
+.sim-body > .hint { display: block; margin-top: 8px; }
+.sim-body .form-error { margin-top: 10px; }
+.sim-result h3 { font-size: 14px; margin: 16px 0 8px; }
+.sim-summary code, .sim-list code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.sim-table { margin-top: 4px; }
+tr.sim-origin { background: #fdf6ec; }
+.sim-new { color: var(--primary-dark); font-weight: 700; }
+.sim-delta { color: var(--warn-ink); font-weight: 700; }
+.sim-list { margin: 4px 0 0; padding-left: 20px; }
+.sim-list li { margin: 4px 0; }
+.sim-list-danger li::marker { color: var(--danger-ink); }
+.sim-list-warn li::marker { color: var(--warn-ink); }
+.sim-empty { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+
 .hidden { display: none !important; }
 
 /* ---------- 打印视图 ---------- */

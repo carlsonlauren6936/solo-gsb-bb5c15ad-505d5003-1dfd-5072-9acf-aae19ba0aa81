@@ -33,6 +33,26 @@ app.get('/api/conflicts', (_req, res) => {
   res.json(db.computeSchedule().conflicts);
 });
 
+/* 延误推演：仅在内存中把起点提示点的最早开始约束提高后重排，不写库 */
+app.post('/api/simulate-delay', (req, res, next) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object') badRequest('请求体必须是 JSON 对象');
+
+    const cueId = Number(body.cueId);
+    if (!Number.isInteger(cueId) || cueId <= 0) badRequest('请选择要推演的提示点');
+
+    // 延误量沿用时长的时间格式：纯数字按分钟，也支持 MM:SS / H:MM:SS
+    const delay = parseTime(body.delay, { asMinutes: true });
+    if (delay == null) badRequest('请填写延误量（纯数字按分钟，也支持 MM:SS、H:MM:SS）');
+    if (delay < 0) badRequest('延误量不能为负');
+
+    res.json(db.simulateDelay(cueId, delay));
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/api/cues/:id', (req, res) => {
   const cue = db.getCue(Number(req.params.id));
   if (!cue) return res.status(404).json({ error: '提示点不存在' });

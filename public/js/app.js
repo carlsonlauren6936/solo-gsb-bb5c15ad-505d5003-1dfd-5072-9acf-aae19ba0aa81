@@ -6,6 +6,7 @@ let state = {
   cycle: null,
   conflicts: [], // 演员时间冲突
   editingId: null,
+  sim: null, // 延误推演结果（null 表示未在推演）
 };
 
 const els = {
@@ -18,6 +19,12 @@ const els = {
   modalTitle: document.getElementById('modal-title'),
   preList: document.getElementById('pre-list'),
   formError: document.getElementById('form-error'),
+  simForm: document.getElementById('sim-form'),
+  simCue: document.getElementById('sim-cue'),
+  simDelay: document.getElementById('sim-delay'),
+  simClear: document.getElementById('sim-clear'),
+  simError: document.getElementById('sim-error'),
+  simResult: document.getElementById('sim-result'),
 };
 
 document.getElementById('btn-new').addEventListener('click', () => openModal());
@@ -26,6 +33,8 @@ els.mask.addEventListener('click', (e) => {
   if (e.target === els.mask) closeModal();
 });
 els.form.addEventListener('submit', onSubmit);
+els.simForm.addEventListener('submit', onSimulate);
+els.simClear.addEventListener('click', clearSimulation);
 
 async function refresh() {
   const [cues, scheduleResult] = await Promise.all([
@@ -36,6 +45,8 @@ async function refresh() {
   state.scheduled = scheduleResult.cues;
   state.cycle = scheduleResult.cycle;
   state.conflicts = scheduleResult.conflicts || [];
+  state.sim = null; // 数据已变化，旧的推演结果作废
+  hideSimError();
   render();
 }
 
@@ -44,6 +55,8 @@ function render() {
   renderConflictBanner();
   renderStats();
   renderTable();
+  renderSimControls();
+  renderSimResult();
 }
 
 function renderBanner() {
@@ -215,6 +228,157 @@ function statusBadge(c) {
   }
   if (!badges.length) badges.push('<span class="badge badge-ok">正常</span>');
   return badges.join(' ');
+}
+
+/* ---------- 延误推演 ---------- */
+
+/** 起点下拉框：仅列已成功排程的提示点（环上 / 被环阻塞者不可作为起点） */
+function renderSimControls() {
+  const options = state.scheduled.filter((c) => c.scheduled);
+  const prev = els.simCue.value;
+  if (!options.length) {
+    els.simCue.innerHTML = '<option value="">暂无可推演的已排程提示点</option>';
+    return;
+  }
+  els.simCue.innerHTML = options
+    .map((c) => {
+      const label = `${c.ref ? c.ref + ' · ' : ''}${c.title}`;
+      return `<option value="${c.id}">${CS.esc(label)}（开始 ${CS.fmtTime(c.earliestStart)}）</option>`;
+    })
+    .join('');
+  if (prev && options.some((c) => String(c.id) === prev)) els.simCue.value = prev;
+}
+
+async function onSimulate(e) {
+  e.preventDefault();
+  hideSimError();
+
+  const cueId = Number(els.simCue.value);
+  if (!cueId) return showSimError('请选择要推演的提示点');
+
+  const delay = els.simDelay.value.trim();
+  if (!delay) return showSimError('请填写延误量（纯数字按分钟，也支持 MM:SS、H:MM:SS）');
+  if (/^-/.test(delay)) return showSimError('延误量不能为负');
+
+  try {
+    state.sim = await CS.api('/api/simulate-delay', {
+      method: 'POST',
+      body: JSON.stringify({ cueId, delay }),
+    });
+    renderSimResult();
+  } catch (err) {
+    state.sim = null;
+    renderSimResult();
+    showSimError(err.message);
+  }
+}
+
+/** 清除推演：关闭推演视图，恢复查看正式排程 */
+function clearSimulation() {
+  state.sim = null;
+  els.simDelay.value = '';
+  hideSimError();
+  render();
+}
+
+function showSimError(msg) {
+  els.simError.textContent = msg;
+  els.simError.classList.remove('hidden');
+}
+
+function hideSimError() {
+  els.simError.classList.add('hidden');
+  els.simError.textContent = '';
+}
+
+function renderSimResult() {
+  const result = state.sim;
+  if (!result) {
+    els.simResult.classList.add('hidden');
+    els.simResult.innerHTML = '';
+    return;
+  }
+
+  const o = result.origin;
+  const originLabel = `${o.ref ? CS.esc(o.ref) + ' ' : ''}「${CS.esc(o.title)}」`;
+  const parts = [];
+
+  parts.push(
+    `<div class="banner banner-warn sim-summary">🔍 <strong>推演模式：</strong>${originLabel} ` +
+      `计算开始 <code>${CS.fmtTime(o.originalStart)}</code> → <code>${CS.fmtTime(o.simulatedStart)}</code>` +
+      `（延误 ${CS.fmtDur(result.delay)}），共影响 <strong>${result.changes.length}</strong> 个提示点；` +
+      `新增超时 <strong>${result.newOverdue.length}</strong> 处，新增演员冲突 <strong>${result.newConflicts.length}</strong> 处。<br>` +
+      `<span>模拟结果仅用于本次推演，未写入数据库，正式排程不受影响；点击“清除推演”关闭本视图。</span></div>`
+  );
+
+  /* 受影响提示点：原排程 vs 模拟排程 */
+  parts.push('<h3>受影响提示点</h3>');
+  if (!result.changes.length) {
+    parts.push('<p class="sim-empty">排程无变化。</p>');
+  } else {
+    const rows = result.changes
+      .map((ch) => {
+        const isOrigin = ch.id === o.id;
+        const label =
+          (ch.ref ? `<span class="cue-ref">${CS.esc(ch.ref)}</span>` : '') +
+          `<span class="cue-name">${CS.esc(ch.title)}</span>`;
+        return `<tr class="${isOrigin ? 'sim-origin' : ''}">
+          <td>${label}${isOrigin ? ' <span class="badge badge-conflict">起点</span>' : ''}</td>
+          <td class="num t-time">${CS.fmtTime(ch.originalStart)}</td>
+          <td class="num t-time">${CS.fmtTime(ch.originalFinish)}</td>
+          <td class="num t-time sim-new">${CS.fmtTime(ch.simulatedStart)}</td>
+          <td class="num t-time sim-new">${CS.fmtTime(ch.simulatedFinish)}</td>
+          <td class="num sim-delta">+${CS.fmtDur(ch.delta)}</td>
+        </tr>`;
+      })
+      .join('');
+    parts.push(
+      `<div class="table-wrap"><table class="cue-table sim-table"><thead><tr>` +
+        `<th>提示点</th><th class="num">原开始</th><th class="num">原结束</th>` +
+        `<th class="num">模拟开始</th><th class="num">模拟结束</th><th class="num">变化量</th>` +
+        `</tr></thead><tbody>${rows}</tbody></table></div>`
+    );
+  }
+
+  /* 新出现的超时 */
+  parts.push('<h3>新出现的超时</h3>');
+  if (!result.newOverdue.length) {
+    parts.push('<p class="sim-empty">无新增超时。</p>');
+  } else {
+    const items = result.newOverdue
+      .map((it) => {
+        const label = `${it.ref ? CS.esc(it.ref) + ' ' : ''}「${CS.esc(it.title)}」`;
+        return (
+          `<li>⚠ ${label}：模拟结束 <code>${CS.fmtTime(it.simulatedFinish)}</code> 超过最晚完成 ` +
+          `<code>${CS.fmtTime(it.maxFinish)}</code>（超时 ${CS.fmtDur(it.overdueBy)}）</li>`
+        );
+      })
+      .join('');
+    parts.push(`<ul class="sim-list sim-list-danger">${items}</ul>`);
+  }
+
+  /* 新出现的演员时间冲突 */
+  parts.push('<h3>新出现的演员时间冲突</h3>');
+  if (!result.newConflicts.length) {
+    parts.push('<p class="sim-empty">无新增演员冲突。</p>');
+  } else {
+    const items = result.newConflicts
+      .map((cf) => {
+        const la = `${cf.cueA.ref ? CS.esc(cf.cueA.ref) + ' ' : ''}「${CS.esc(cf.cueA.title)}」`;
+        const lb = `${cf.cueB.ref ? CS.esc(cf.cueB.ref) + ' ' : ''}「${CS.esc(cf.cueB.title)}」`;
+        return (
+          `<li>⚠ 演员 <strong>${CS.esc(cf.actor)}</strong>：${la} 与 ${lb} 在 ` +
+          `<code>${CS.fmtTime(cf.overlapStart)} – ${CS.fmtTime(cf.overlapEnd)}</code> 重叠</li>`
+        );
+      })
+      .join('');
+    parts.push(`<ul class="sim-list sim-list-warn">${items}</ul>`);
+  }
+
+  parts.push('<p class="hint">已存在的超时与演员冲突仍以上方正式排程为准，不计入以上新增。</p>');
+
+  els.simResult.innerHTML = parts.join('');
+  els.simResult.classList.remove('hidden');
 }
 
 /* ---------- 弹窗 ---------- */

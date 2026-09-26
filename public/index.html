@@ -54,6 +54,32 @@
         </table>
       </div>
     </section>
+
+    <section class="card sim-card" id="sim-card">
+      <div class="card-head">
+        <h2>延误推演</h2>
+        <span class="hint">仅在内存中模拟，不写入数据库，不影响正式排程</span>
+      </div>
+      <div class="sim-body">
+        <form class="sim-controls" id="sim-form">
+          <div class="sim-field">
+            <label for="sim-cue">推演起点（已排程提示点）</label>
+            <select id="sim-cue"></select>
+          </div>
+          <div class="sim-field">
+            <label for="sim-delay">延误量</label>
+            <input type="text" id="sim-delay" placeholder="如 10 或 5:30" />
+          </div>
+          <div class="sim-ops">
+            <button type="submit" class="btn btn-primary">开始推演</button>
+            <button type="button" class="btn btn-ghost" id="sim-clear">清除推演</button>
+          </div>
+        </form>
+        <small class="hint">延误量相对起点当前的计算开始时间：纯数字按分钟，也支持 <code>MM:SS</code> / <code>H:MM:SS</code>；环上或被环阻塞的提示点不可作为起点。</small>
+        <div class="form-error hidden" id="sim-error"></div>
+        <div id="sim-result" class="sim-result hidden"></div>
+      </div>
+    </section>
   </main>
 
   <!-- 新增 / 编辑弹窗 -->

@@ -105,9 +105,9 @@ function getCue(id) {
   return row;
 }
 
-/** 从数据库重建模型并执行排程 */
-function computeSchedule() {
-  const cues = listCues().map((c) => ({
+/** 读取数据库并组装排程器输入模型 */
+function loadCueModel() {
+  return listCues().map((c) => ({
     id: c.id,
     ref: c.ref,
     title: c.title,
@@ -117,7 +117,107 @@ function computeSchedule() {
     actors: c.actors,
     prerequisites: c.prerequisites,
   }));
-  return schedule(cues);
+}
+
+/** 从数据库重建模型并执行排程 */
+function computeSchedule() {
+  return schedule(loadCueModel());
+}
+
+/**
+ * 延误推演（纯内存，不写库）：
+ * 把指定提示点的最早开始约束提高到“原计算开始时间 + 延误量”后重新排程，
+ * 复用排程与演员冲突计算，返回受影响提示点对比、新增超时与新增演员冲突。
+ */
+function simulateDelay(cueId, delaySeconds) {
+  const cues = loadCueModel();
+  const baseline = schedule(cues);
+  const origin = baseline.cues.find((c) => c.id === cueId);
+  if (!origin) throw httpError(404, '提示点不存在');
+  if (origin.inCycle) {
+    throw httpError(400, `提示点 ${cueLabel(origin)} 处于环依赖上，不可作为推演起点`);
+  }
+  if (origin.blockedByCycle) {
+    throw httpError(400, `提示点 ${cueLabel(origin)} 被环依赖阻塞，不可作为推演起点`);
+  }
+
+  const simulated = schedule(
+    cues.map((c) =>
+      c.id === cueId ? { ...c, minStart: origin.earliestStart + delaySeconds } : c
+    )
+  );
+
+  const baseById = new Map(baseline.cues.map((c) => [c.id, c]));
+
+  // 受影响提示点：开始/结束时间发生变化者（时长不变，开始与结束的变化量相同）
+  const changes = [];
+  for (const s of simulated.cues) {
+    const b = baseById.get(s.id);
+    if (!b || !b.scheduled || !s.scheduled) continue;
+    const delta = s.earliestStart - b.earliestStart;
+    if (delta === 0) continue;
+    changes.push({
+      id: s.id,
+      ref: s.ref,
+      title: s.title,
+      originalStart: b.earliestStart,
+      originalFinish: b.earliestFinish,
+      simulatedStart: s.earliestStart,
+      simulatedFinish: s.earliestFinish,
+      delta,
+    });
+  }
+  changes.sort((a, b) => a.simulatedStart - b.simulatedStart || a.id - b.id);
+
+  // 新增超时：模拟后超时而原本未超时（原本已超时的不计入）
+  const newOverdue = [];
+  for (const s of simulated.cues) {
+    const b = baseById.get(s.id);
+    if (!s.scheduled || !s.overdue || (b && b.overdue)) continue;
+    newOverdue.push({
+      id: s.id,
+      ref: s.ref,
+      title: s.title,
+      maxFinish: s.maxFinish,
+      simulatedFinish: s.earliestFinish,
+      overdueBy: s.earliestFinish - s.maxFinish,
+    });
+  }
+
+  // 新增演员冲突：按 演员+提示点组合 与正式排程比对，原本已有的不计入
+  const baseKeys = new Set(baseline.conflicts.map(conflictKey));
+  const newConflicts = simulated.conflicts.filter((c) => !baseKeys.has(conflictKey(c)));
+
+  return {
+    origin: {
+      id: origin.id,
+      ref: origin.ref,
+      title: origin.title,
+      originalStart: origin.earliestStart,
+      simulatedStart: origin.earliestStart + delaySeconds,
+    },
+    delay: delaySeconds,
+    changes,
+    newOverdue,
+    newConflicts,
+  };
+}
+
+/** 冲突去重键：同一演员在同一对提示点上的冲突视为同一问题 */
+function conflictKey(c) {
+  const a = Math.min(c.cueA.id, c.cueB.id);
+  const b = Math.max(c.cueA.id, c.cueB.id);
+  return `${c.actor}|${a}|${b}`;
+}
+
+function cueLabel(c) {
+  return c.ref ? `${c.ref}「${c.title}」` : `「${c.title}」`;
+}
+
+function httpError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
 }
 
 function createCue(data) {
@@ -237,6 +337,7 @@ module.exports = {
   listCues,
   getCue,
   computeSchedule,
+  simulateDelay,
   createCue,
   updateCue,
   deleteCue,

@@ -5,7 +5,9 @@
 时指出涉及的提示点与环路，并自动标出**超过最晚完成时间**的项目。每个提示点还可填写多名
 **演员**，系统自动检查同一演员是否被排到**时间重叠**的提示点（演员走位冲突），并在列表、
 打印走台单与接口中标出。提供按开始时间排序的**走台单**和专用**打印视图**（可直接打印或
-另存为 PDF）。
+另存为 PDF）。另有**延误推演**：任选已排程提示点并给定延误量，仅在内存中把该点最早开始
+约束后移重新排程，对比受影响提示点的原排程与模拟排程，并单独列出新出现的超时与演员冲突，
+不写入数据库。
 
 技术栈：Node.js + Express + SQLite（better-sqlite3）+ 原生 HTML/CSS/JavaScript（无前端构建）。
 
@@ -92,6 +94,23 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
   `overlapStart`、`overlapEnd`，时间均为相对开排零点的秒数），每个提示点上另有
   `conflictActors` 字段；`GET /api/conflicts` 单独返回该冲突数组。
 
+### 延误推演
+
+- 在排程页底部“延误推演”面板选择一个**已排程**提示点作为起点，输入相对其当前
+  **计算开始时间**的非负**延误量**（时间格式同上：纯数字按分钟，也支持 `MM:SS` /
+  `H:MM:SS`），点击“开始推演”。
+- 推演仅在**内存**中把该点的最早开始约束提高到“原计算开始时间 + 延误量”，复用同一套
+  排程与演员冲突计算，**不写入数据库**，正式排程不受影响。
+- **环上或被环阻塞的提示点不可作为起点**（下拉框只列出可推演的已排程提示点）；未选起点、
+  延误量为空、为负或格式非法时都会给出提示。
+- 推演结果列出所有**受影响提示点**的原开始 / 原结束 / 模拟开始 / 模拟结束 / 变化量，
+  并**单独列出新出现的超时与新出现的演员时间冲突**；已有问题仍以上方正式排程为准，
+  不计为新增。
+- 点击“清除推演”关闭推演视图，恢复查看正式排程；修改任意提示点后旧的推演结果自动作废。
+- 接口：`POST /api/simulate-delay`，请求体 `{ "cueId": 6, "delay": "20" }`（`delay` 为
+  延误量，纯数字按分钟，也可传 `MM:SS` 字符串或分钟数），响应含 `origin`、`changes`、
+  `newOverdue`、`newConflicts` 四部分。
+
 ### 打印视图
 
 <http://localhost:3000/print> 提供干净的 A4 走台单（含日期 / 场地 / 舞台监督签名栏与逐项
@@ -107,6 +126,7 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
 | `GET` | `/api/cues/:id` | 单个提示点 |
 | `GET` | `/api/schedule` | 完整排程结果（含计算时间、超时 / 环标记、环路与演员冲突 `conflicts`） |
 | `GET` | `/api/conflicts` | 演员时间冲突列表（演员、两项提示点、重叠时段） |
+| `POST` | `/api/simulate-delay` | 延误推演（纯内存，不写库）：起点 `cueId` + 延误量 `delay`，返回受影响项对比、新增超时与新增演员冲突 |
 | `POST` | `/api/cues` | 新增提示点 |
 | `PUT` | `/api/cues/:id` | 修改提示点（前置列表、演员名单全量替换，保存后自动重排并重查冲突） |
 | `DELETE` | `/api/cues/:id` | 删除提示点（相关依赖与演员记录一并删除） |
@@ -141,6 +161,37 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
   }
 ]
 ```
+
+`POST /api/simulate-delay` 响应示例（对 Q6 推演 20 分钟延误）：
+
+```json
+{
+  "origin": { "id": 6, "ref": "Q6", "title": "台词专项排练", "originalStart": 1500, "simulatedStart": 2700 },
+  "delay": 1200,
+  "changes": [
+    {
+      "id": 6, "ref": "Q6", "title": "台词专项排练",
+      "originalStart": 1500, "originalFinish": 2400,
+      "simulatedStart": 2700, "simulatedFinish": 3600,
+      "delta": 1200
+    }
+  ],
+  "newOverdue": [],
+  "newConflicts": [
+    {
+      "actor": "陈默",
+      "cueA": { "id": 5, "ref": "Q5", "title": "谢幕定位", "earliestStart": 3300, "earliestFinish": 3780 },
+      "cueB": { "id": 6, "ref": "Q6", "title": "台词专项排练", "earliestStart": 2700, "earliestFinish": 3600 },
+      "overlapStart": 3300,
+      "overlapEnd": 3600
+    }
+  ]
+}
+```
+
+`changes[].delta` 为开始 / 结束时间的变化量（秒，时长不变故二者相同）；`newOverdue` /
+`newConflicts` 只含相对正式排程**新出现**的问题。起点不存在返回 404；起点在环上或被环
+阻塞、延误量为负或格式非法返回 400 及中文提示。
 
 ## 项目结构
 
