@@ -92,6 +92,29 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
   `overlapStart`、`overlapEnd`，时间均为相对开排零点的秒数），每个提示点上另有
   `conflictActors` 字段；`GET /api/conflicts` 单独返回该冲突数组。
 
+### 延误推演（仅内存模拟，不保存）
+
+- 在排程页面「**延误推演（仅模拟，不保存）**」卡片中选择一个**已排程提示点**作为延误起点，
+  填写相对其**当前计算开始时间**的非负延误量（格式与时长输入一致：纯数字按分钟，
+  也支持 `MM:SS` / `H:MM:SS`，如 `10` = 10 分钟、`1:30` = 1 分 30 秒），点击「开始推演」。
+- 推演时仅在内存中把起点的最早开始约束提高到「原计算开始时间 + 延误量」，随后**复用现有
+  排程与演员冲突计算**重新推演；不写入数据库，刷新或清除推演即恢复正式排程。
+- 结果区展示：
+  - **受影响提示点**的原排程与模拟排程开始 / 结束时间及变化量（`+H:MM:SS`）；
+  - 单独列出**新增超时**（原本未超最晚完成、推演后超过）与**新增演员时间冲突**
+    （推演后才出现的同演员时间重叠对）；
+  - 推演期间下方走台单切换为模拟排程，受影响行高亮并在时间单元格标注变化量。
+- **正式排程中已存在的超时与演员冲突在推演期间仍可见**（顶部横幅、行高亮、徽标），
+  但**不计为新增**。
+- **环上或被环阻塞的提示点不可作为起点**（下拉框中置灰）；延误量为负、格式无法识别、
+  未选择起点等非法输入会在推演卡片内给出提示。
+- 点击「**清除推演**」立即恢复正式排程；在推演期间新增 / 编辑 / 删除提示点会自动清除推演。
+- 接口：`POST /api/schedule/simulate-delay`，请求体 `{ "cueId": 1, "delay": "10" }`
+  （`delay` 为时间字符串：纯数字按分钟，与时长录入规则一致；也接受非负数字值，同样按分钟计）。响应含 `target`（起点及延误量）、`affected`（受影响提示点
+  的 `baseStart/baseFinish/simulatedStart/simulatedFinish/deltaStart/deltaFinish/newOverdue`
+  等）、`newOverdue`、`newConflicts`（结构同 `/api/conflicts` 条目），并附带完整的
+  `baseline` 与 `simulated` 排程结果；非法输入返回 `400`，提示点不存在返回 `404`。
+
 ### 打印视图
 
 <http://localhost:3000/print> 提供干净的 A4 走台单（含日期 / 场地 / 舞台监督签名栏与逐项
@@ -107,6 +130,7 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
 | `GET` | `/api/cues/:id` | 单个提示点 |
 | `GET` | `/api/schedule` | 完整排程结果（含计算时间、超时 / 环标记、环路与演员冲突 `conflicts`） |
 | `GET` | `/api/conflicts` | 演员时间冲突列表（演员、两项提示点、重叠时段） |
+| `POST` | `/api/schedule/simulate-delay` | 延误推演（纯内存，不写库）：`{ "cueId": 1, "delay": "10" }`，返回受影响提示点的原/模拟时间与变化量、新增超时与新增冲突 |
 | `POST` | `/api/cues` | 新增提示点 |
 | `PUT` | `/api/cues/:id` | 修改提示点（前置列表、演员名单全量替换，保存后自动重排并重查冲突） |
 | `DELETE` | `/api/cues/:id` | 删除提示点（相关依赖与演员记录一并删除） |
@@ -140,6 +164,40 @@ Compose 下修改示例数据开关：在 `docker-compose.yml` 的 environment �
     "overlapEnd": 2100
   }
 ]
+```
+
+`POST /api/schedule/simulate-delay` 响应示例（节选）：
+
+```json
+{
+  "target": {
+    "id": 6, "ref": "Q6", "title": "台词专项排练", "delay": 1500,
+    "baselineStart": 1500, "baselineFinish": 2400,
+    "simulatedStart": 3000, "simulatedFinish": 3900
+  },
+  "affected": [
+    {
+      "id": 6, "ref": "Q6", "title": "台词专项排练",
+      "baseStart": 1500, "baseFinish": 2400,
+      "simulatedStart": 3000, "simulatedFinish": 3900,
+      "deltaStart": 1500, "deltaFinish": 1500,
+      "baseOverdue": false, "simulatedOverdue": false, "newOverdue": false,
+      "newConflictActors": ["周航", "陈默"]
+    }
+  ],
+  "newOverdue": [],
+  "newConflicts": [
+    {
+      "actor": "陈默",
+      "cueA": { "id": 5, "ref": "Q5", "title": "谢幕定位", "earliestStart": 3300, "earliestFinish": 3780 },
+      "cueB": { "id": 6, "ref": "Q6", "title": "台词专项排练", "earliestStart": 3000, "earliestFinish": 3900 },
+      "overlapStart": 3300,
+      "overlapEnd": 3780
+    }
+  ],
+  "baseline": { "cues": [ "…完整正式排程（结构同 /api/schedule）…" ], "cycle": null, "conflicts": [] },
+  "simulated": { "cues": [ "…完整模拟排程…" ], "cycle": null, "conflicts": [] }
+}
 ```
 
 ## 项目结构

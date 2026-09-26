@@ -24,13 +24,38 @@
   <main class="container">
     <div id="cycle-banner" class="banner banner-danger hidden"></div>
     <div id="conflict-banner" class="banner banner-warn hidden"></div>
+    <div id="sim-banner" class="banner banner-info hidden"></div>
 
     <section class="stats" id="stats"></section>
 
+    <section class="card sim-card" id="sim-card">
+      <div class="card-head">
+        <h2>延误推演（仅模拟，不保存）</h2>
+        <span class="hint">选择一个已排程提示点，推演其开始时间整体延后的影响；环上或被环阻塞的提示点不可选</span>
+      </div>
+      <form id="sim-form" class="sim-form">
+        <div class="sim-field">
+          <label for="sim-cue">延误起点</label>
+          <select id="sim-cue" name="cueId"></select>
+        </div>
+        <div class="sim-field">
+          <label for="sim-delay">延误量</label>
+          <input type="text" id="sim-delay" name="delay" placeholder="非负，如 10 或 1:30" />
+          <small class="hint">纯数字按分钟；也可用 <code>MM:SS</code> / <code>H:MM:SS</code></small>
+        </div>
+        <div class="sim-ops">
+          <button type="submit" class="btn btn-primary">开始推演</button>
+          <button type="button" class="btn btn-ghost" id="btn-sim-clear">清除推演</button>
+        </div>
+      </form>
+      <div class="form-error hidden sim-error" id="sim-error"></div>
+      <div id="sim-result"></div>
+    </section>
+
     <section class="card">
       <div class="card-head">
-        <h2>走台单（按最早开始时间排序）</h2>
-        <span class="hint">修改任一项后自动重新排程</span>
+        <h2 id="schedule-title">走台单（按最早开始时间排序）</h2>
+        <span class="hint" id="schedule-hint">修改任一项后自动重新排程</span>
       </div>
       <div class="table-wrap">
         <table class="cue-table">

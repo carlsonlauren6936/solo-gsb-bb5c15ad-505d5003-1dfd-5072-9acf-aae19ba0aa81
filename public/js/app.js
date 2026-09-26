@@ -2,22 +2,31 @@
 
 let state = {
   cues: [], // 原始提示点（供前置选择）
-  scheduled: [], // 排程结果
+  scheduled: [], // 正式排程结果
   cycle: null,
-  conflicts: [], // 演员时间冲突
+  conflicts: [], // 正式排程的演员时间冲突
   editingId: null,
+  sim: null, // 延误推演结果（null 表示未推演 / 已清除）
 };
 
 const els = {
   tbody: document.getElementById('cue-tbody'),
   banner: document.getElementById('cycle-banner'),
   conflictBanner: document.getElementById('conflict-banner'),
+  simBanner: document.getElementById('sim-banner'),
   stats: document.getElementById('stats'),
   mask: document.getElementById('modal-mask'),
   form: document.getElementById('cue-form'),
   modalTitle: document.getElementById('modal-title'),
   preList: document.getElementById('pre-list'),
   formError: document.getElementById('form-error'),
+  simForm: document.getElementById('sim-form'),
+  simCue: document.getElementById('sim-cue'),
+  simDelay: document.getElementById('sim-delay'),
+  simError: document.getElementById('sim-error'),
+  simResult: document.getElementById('sim-result'),
+  scheduleTitle: document.getElementById('schedule-title'),
+  scheduleHint: document.getElementById('schedule-hint'),
 };
 
 document.getElementById('btn-new').addEventListener('click', () => openModal());
@@ -26,6 +35,16 @@ els.mask.addEventListener('click', (e) => {
   if (e.target === els.mask) closeModal();
 });
 els.form.addEventListener('submit', onSubmit);
+els.simForm.addEventListener('submit', onSimulate);
+document.getElementById('btn-sim-clear').addEventListener('click', clearSimulation);
+
+/** 推演时表格/统计使用模拟排程，清除后恢复正式排程 */
+function viewScheduled() {
+  return state.sim ? state.sim.simulated.cues : state.scheduled;
+}
+function viewConflicts() {
+  return state.sim ? state.sim.simulated.conflicts : state.conflicts;
+}
 
 async function refresh() {
   const [cues, scheduleResult] = await Promise.all([
@@ -36,17 +55,23 @@ async function refresh() {
   state.scheduled = scheduleResult.cues;
   state.cycle = scheduleResult.cycle;
   state.conflicts = scheduleResult.conflicts || [];
+  // 正式数据已变化（增删改后），内存中的推演结果失效，恢复正式排程视图
+  if (state.sim) resetSimulation({ keepInput: true });
   render();
 }
 
 function render() {
   renderBanner();
   renderConflictBanner();
+  renderSimBanner();
   renderStats();
+  renderSimSelect();
+  renderSimResult();
   renderTable();
 }
 
 function renderBanner() {
+  // 环依赖属于正式排程问题，推演期间也持续可见
   if (!state.cycle) {
     els.banner.classList.add('hidden');
     els.banner.innerHTML = '';
@@ -75,6 +100,7 @@ function renderBanner() {
 }
 
 function renderConflictBanner() {
+  // 始终展示正式排程中已有的演员冲突（推演期间这些是“已有问题”，不计为新增）
   if (!state.conflicts.length) {
     els.conflictBanner.classList.add('hidden');
     els.conflictBanner.innerHTML = '';
@@ -90,19 +116,228 @@ function renderConflictBanner() {
     )
     .join(' ');
   els.conflictBanner.innerHTML =
-    `⚠ <strong>发现 ${state.conflicts.length} 处演员时间冲突：</strong><br>` +
+    `⚠ <strong>正式排程存在 ${state.conflicts.length} 处演员时间冲突（推演中仍计为已有问题）：</strong><br>` +
     `${items}<br>` +
     `<span>结束恰好等于另一项开始不算冲突；环依赖及其阻塞项不参与检查。修改演员、时长或前置关系后自动重新检查。</span>`;
   els.conflictBanner.classList.remove('hidden');
 }
 
+/* ---------- 延误推演 ---------- */
+
+function cueFullLabel(c) {
+  return `${c.ref ? c.ref + ' · ' : ''}${c.title}`;
+}
+
+function renderSimBanner() {
+  if (!state.sim) {
+    els.simBanner.classList.add('hidden');
+    els.simBanner.innerHTML = '';
+    els.scheduleTitle.textContent = '走台单（按最早开始时间排序）';
+    els.scheduleHint.textContent = '修改任一项后自动重新排程';
+    return;
+  }
+  const t = state.sim.target;
+  const label = `${t.ref ? CS.esc(t.ref) + ' ' : ''}「${CS.esc(t.title)}」`;
+  els.simBanner.innerHTML =
+    `🧪 <strong>延误推演进行中：</strong>起点 ${label} 延后 <code>${CS.fmtDur(t.delay)}</code>` +
+    `（正式开始 ${CS.fmtTime(t.baselineStart)} → 模拟开始 ${CS.fmtTime(t.simulatedStart)}）。` +
+    `推演仅在内存中计算，<strong>未写入数据库</strong>；下方表格展示的是模拟排程，` +
+    `变化见“延误推演”区块，点击“清除推演”恢复正式排程。`;
+  els.simBanner.classList.remove('hidden');
+  els.scheduleTitle.textContent = '走台单 · 模拟排程（推演中）';
+  els.scheduleHint.textContent = '清除推演后恢复正式排程';
+}
+
+function renderSimSelect() {
+  const selectable = state.scheduled.filter((c) => c.scheduled);
+  const disabled = state.scheduled.filter((c) => !c.scheduled);
+  const keepId = Number(els.simCue.value);
+  const currentId = state.sim ? state.sim.target.id : keepId;
+
+  const groups = [];
+  groups.push(
+    `<option value="">请选择已排程提示点…</option>` +
+      selectable
+        .map(
+          (c) =>
+            `<option value="${c.id}"${c.id === currentId ? ' selected' : ''}>${CS.esc(
+              cueFullLabel(c)
+            )}（开始 ${CS.fmtTime(c.earliestStart)}）</option>`
+        )
+        .join('')
+  );
+  if (disabled.length) {
+    const inCycle = disabled.filter((c) => c.inCycle);
+    const blocked = disabled.filter((c) => !c.inCycle);
+    const opt = (c, reason) =>
+      `<option value="${c.id}" disabled>${CS.esc(cueFullLabel(c))}（${reason}，不可选）</option>`;
+    groups.push(
+      `<optgroup label="不可作为起点">` +
+        inCycle.map((c) => opt(c, '环依赖')).join('') +
+        blocked.map((c) => opt(c, '环阻塞')).join('') +
+        `</optgroup>`
+    );
+  }
+  els.simCue.innerHTML = groups.join('');
+}
+
+async function onSimulate(e) {
+  e.preventDefault();
+  els.simError.classList.add('hidden');
+  const cueId = Number(els.simCue.value);
+  const delay = els.simDelay.value.trim();
+  if (!cueId) return simError('请选择一个已排程提示点作为延误起点');
+  if (!delay) return simError('请填写非负延误量（格式如 5、5:30、1:02:30，纯数字按分钟）');
+
+  try {
+    const result = await CS.api('/api/schedule/simulate-delay', {
+      method: 'POST',
+      body: JSON.stringify({ cueId, delay }),
+    });
+    state.sim = result;
+    render();
+  } catch (err) {
+    simError(err.message);
+  }
+}
+
+function simError(msg) {
+  els.simError.textContent = msg;
+  els.simError.classList.remove('hidden');
+}
+
+/** 清除推演：恢复正式排程（不重新拉取数据，直接丢弃内存中的模拟结果） */
+function clearSimulation() {
+  resetSimulation({ keepInput: false });
+  render();
+}
+
+function resetSimulation({ keepInput }) {
+  state.sim = null;
+  els.simError.classList.add('hidden');
+  els.simError.textContent = '';
+  if (!keepInput) {
+    els.simForm.reset();
+  }
+}
+
+function renderSimResult() {
+  const sim = state.sim;
+  if (!sim) {
+    els.simResult.innerHTML = '';
+    return;
+  }
+
+  const t = sim.target;
+  const label = (a) => `${a.ref ? CS.esc(a.ref) + ' ' : ''}「${CS.esc(a.title)}」`;
+  const delta = (d) =>
+    d === 0
+      ? '<span class="sim-delta-zero">±0:00</span>'
+      : `<span class="sim-delta-up">+${CS.fmtDur(d)}</span>`;
+
+  const affectedRows = sim.affected.length
+    ? sim.affected
+        .map(
+          (a) => `
+        <tr class="sim-affected-row${a.newOverdue ? ' row-overdue' : ''}">
+          <td>${label(a)}</td>
+          <td class="num">${CS.fmtTime(a.baseStart)}</td>
+          <td class="num">${CS.fmtTime(a.simulatedStart)}</td>
+          <td class="num">${delta(a.deltaStart)}</td>
+          <td class="num">${CS.fmtTime(a.baseFinish)}</td>
+          <td class="num ${a.newOverdue ? 't-overdue' : ''}">${CS.fmtTime(
+            a.simulatedFinish
+          )}</td>
+          <td class="num">${delta(a.deltaFinish)}</td>
+          <td>${simRowBadges(a)}</td>
+        </tr>`
+        )
+        .join('')
+    : `<tr><td colspan="8" class="sim-empty">该延误量下没有提示点的排程发生变化。</td></tr>`;
+
+  const newOverdueBlock = sim.newOverdue.length
+    ? `<div class="sim-sub sim-sub-danger">
+         <h4>新增超时（${sim.newOverdue.length}）</h4>
+         <ul>${sim.newOverdue
+           .map(
+             (a) =>
+               `<li>${label(a)}：模拟结束 ${CS.fmtTime(a.simulatedFinish)}，结束时间后移 ${CS.fmtDur(
+                 a.deltaFinish
+               )}，新超过最晚完成时间</li>`
+           )
+           .join('')}</ul>
+       </div>`
+    : `<div class="sim-sub sim-sub-ok"><h4>新增超时（0）</h4><span>没有新出现的超时。</span></div>`;
+
+  const newConflictsBlock = sim.newConflicts.length
+    ? `<div class="sim-sub sim-sub-warn">
+         <h4>新增演员时间冲突（${sim.newConflicts.length}）</h4>
+         <ul>${sim.newConflicts
+           .map(
+             (cf) =>
+               `<li><strong>${CS.esc(cf.actor)}</strong>：${label(cf.cueA)} 与 ${label(
+                 cf.cueB
+               )} 在 <code>${CS.fmtTime(cf.overlapStart)} – ${CS.fmtTime(
+                 cf.overlapEnd
+               )}</code> 重叠</li>`
+           )
+           .join('')}</ul>
+         <span class="hint">正式排程中已存在的冲突仍在上方琥珀色横幅与表格中可见，不计为新增。</span>
+       </div>`
+    : `<div class="sim-sub sim-sub-ok"><h4>新增演员时间冲突（0）</h4><span>没有新出现的演员时间冲突。</span></div>`;
+
+  els.simResult.innerHTML = `
+    <div class="sim-summary">
+      <div class="stat"><div class="num">${CS.fmtDur(t.delay)}</div><div class="label">延误量</div></div>
+      <div class="stat"><div class="num">${sim.affected.length}</div><div class="label">受影响提示点</div></div>
+      <div class="stat ${sim.newOverdue.length ? 'danger' : ''}"><div class="num">${sim.newOverdue.length}</div><div class="label">新增超时</div></div>
+      <div class="stat ${sim.newConflicts.length ? 'warn' : ''}"><div class="num">${sim.newConflicts.length}</div><div class="label">新增演员冲突</div></div>
+    </div>
+    <div class="table-wrap">
+      <table class="cue-table sim-table">
+        <thead>
+          <tr>
+            <th>提示点</th>
+            <th class="num">原开始</th>
+            <th class="num">模拟开始</th>
+            <th class="num">开始变化</th>
+            <th class="num">原结束</th>
+            <th class="num">模拟结束</th>
+            <th class="num">结束变化</th>
+            <th>新增问题</th>
+          </tr>
+        </thead>
+        <tbody>${affectedRows}</tbody>
+      </table>
+    </div>
+    ${newOverdueBlock}
+    ${newConflictsBlock}`;
+}
+
+function simRowBadges(a) {
+  const badges = [];
+  if (a.newOverdue) badges.push('<span class="badge badge-overdue">新增超时</span>');
+  if (a.newConflictActors && a.newConflictActors.length) {
+    badges.push(
+      `<span class="badge badge-conflict" title="演员 ${CS.esc(
+        a.newConflictActors.join('、')
+      )} 新增时间重叠">新增演员冲突</span>`
+    );
+  }
+  if (!badges.length) return '<span class="hint">—</span>';
+  return badges.join(' ');
+}
+
+/* ---------- 统计与走台单 ---------- */
+
 function renderStats() {
-  const total = state.scheduled.length;
-  const scheduled = state.scheduled.filter((c) => c.scheduled);
-  const overdue = state.scheduled.filter((c) => c.overdue).length;
-  const cyclic = state.cycle ? state.cycle.nodes.length : 0;
-  const blocked = state.scheduled.filter((c) => c.blockedByCycle).length;
-  const conflicts = state.conflicts.length;
+  const list = viewScheduled();
+  const conflicts = viewConflicts();
+  const total = list.length;
+  const scheduled = list.filter((c) => c.scheduled);
+  const overdue = list.filter((c) => c.overdue).length;
+  const cyclic = list.filter((c) => c.inCycle).length;
+  const blocked = list.filter((c) => c.blockedByCycle).length;
   const finish = scheduled.length ? Math.max(...scheduled.map((c) => c.earliestFinish)) : null;
 
   const stat = (cls, num, label) =>
@@ -113,15 +348,20 @@ function renderStats() {
     stat('', scheduled.length, '可排程') +
     stat(cyclic ? 'danger' : '', cyclic, '环依赖') +
     stat(blocked ? 'warn' : '', blocked, '被环阻塞') +
-    stat(conflicts ? 'warn' : '', conflicts, '演员冲突') +
-    stat(overdue ? 'danger' : '', overdue, '超过最晚完成') +
+    stat(conflicts.length ? 'warn' : '', conflicts.length, state.sim ? '模拟冲突' : '演员冲突') +
+    stat(overdue ? 'danger' : '', overdue, state.sim ? '模拟超时' : '超过最晚完成') +
     stat('', finish == null ? '—' : CS.fmtTime(finish), '预计全部完成');
 }
 
 function renderTable() {
-  const byId = new Map(state.scheduled.map((c) => [c.id, c]));
-  els.tbody.innerHTML = state.scheduled
+  const list = viewScheduled();
+  const sim = state.sim;
+  const affectedById = sim ? new Map(sim.affected.map((a) => [a.id, a])) : null;
+  const byId = new Map(list.map((c) => [c.id, c]));
+
+  els.tbody.innerHTML = list
     .map((c, i) => {
+      const affected = affectedById ? affectedById.get(c.id) : null;
       const hasConflict = (c.conflictActors || []).length > 0;
       const rowCls = c.inCycle
         ? 'row-cycle'
@@ -144,13 +384,15 @@ function renderTable() {
             .join('')}</div>`
         : '<span class="hint">—</span>';
 
+      const newConflictActors = affected ? affected.newConflictActors : [];
       const actors = (c.actors || []).length
         ? `<div class="actors">${c.actors
             .map((name) => {
               const hit = (c.conflictActors || []).includes(name);
+              const isNew = newConflictActors.includes(name);
               return `<span class="actor-tag ${hit ? 'actor-conflict' : ''}" title="${
-                hit ? '该演员与其他提示点时间重叠' : ''
-              }">${CS.esc(name)}</span>`;
+                isNew ? '推演中新出现的时间重叠' : hit ? '该演员与其他提示点时间重叠' : ''
+              }">${CS.esc(name)}${isNew ? '🆕' : ''}</span>`;
             })
             .join('')}</div>`
         : '<span class="hint">—</span>';
@@ -165,8 +407,19 @@ function renderTable() {
               : CS.fmtDur(c.slack)
         : '—';
 
+      const timeCell = (value, base) => {
+        if (!c.scheduled) return '—';
+        if (!affected) return CS.fmtTime(value);
+        const d = value - base;
+        const deltaHtml = d === 0 ? '' : ` <span class="cell-delta">+${CS.fmtDur(d)}</span>`;
+        return `${CS.fmtTime(value)}${deltaHtml}`;
+      };
+
+      const baseStart = affected ? affected.baseStart : null;
+      const baseFinish = affected ? affected.baseFinish : null;
+
       return `
-      <tr class="${rowCls}">
+      <tr class="${rowCls}${affected ? ' row-sim-affected' : ''}">
         <td>${i + 1}</td>
         <td>
           <span class="cue-ref">${CS.esc(c.ref || `#${c.id}`)}</span>
@@ -176,13 +429,14 @@ function renderTable() {
         <td class="num t-time">${CS.fmtTime(c.minStart)}</td>
         <td>${pres}</td>
         <td>${actors}</td>
-        <td class="num t-time">${c.scheduled ? CS.fmtTime(c.earliestStart) : '—'}</td>
-        <td class="num t-time ${c.overdue ? 't-overdue' : ''}">${
-          c.scheduled ? CS.fmtTime(c.earliestFinish) : '—'
-        }</td>
+        <td class="num t-time">${timeCell(c.earliestStart, baseStart)}</td>
+        <td class="num t-time ${c.overdue ? 't-overdue' : ''}">${timeCell(
+          c.earliestFinish,
+          baseFinish
+        )}</td>
         <td class="num t-time">${c.maxFinish == null ? '不限' : CS.fmtTime(c.maxFinish)}</td>
         <td class="num">${slackCell}</td>
-        <td>${statusBadge(c)}</td>
+        <td>${statusBadge(c, affected)}</td>
         <td>
           <div class="row-ops">
             <button class="btn btn-sm" data-act="edit" data-id="${c.id}">编辑</button>
@@ -200,18 +454,28 @@ function renderTable() {
   });
 }
 
-function statusBadge(c) {
+function statusBadge(c, affected) {
   const badges = [];
   if (c.inCycle) badges.push('<span class="badge badge-cycle">⚠ 环依赖</span>');
   else if (c.blockedByCycle) badges.push('<span class="badge badge-blocked">环阻塞</span>');
-  else if (c.overdue) badges.push('<span class="badge badge-overdue">⚠ 超过最晚完成</span>');
+  else if (c.overdue) {
+    badges.push(
+      affected && affected.newOverdue
+        ? '<span class="badge badge-overdue">⚠ 新增超时（推演）</span>'
+        : '<span class="badge badge-overdue">⚠ 超过最晚完成</span>'
+    );
+  }
 
   if ((c.conflictActors || []).length) {
+    const hasNew = affected && affected.newConflictActors && affected.newConflictActors.length;
     badges.push(
       `<span class="badge badge-conflict" title="演员 ${CS.esc(
         c.conflictActors.join('、')
-      )} 与其他提示点时间重叠">⚠ 演员冲突</span>`
+      )} 与其他提示点时间重叠">${hasNew ? '⚠ 新增演员冲突（推演）' : '⚠ 演员冲突'}</span>`
     );
+  } else if (affected && affected.newConflictActors && affected.newConflictActors.length) {
+    // 新增冲突的演员一定出现在 conflictActors 中，此分支兜底
+    badges.push('<span class="badge badge-conflict">⚠ 新增演员冲突（推演）</span>');
   }
   if (!badges.length) badges.push('<span class="badge badge-ok">正常</span>');
   return badges.join(' ');

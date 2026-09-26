@@ -3,7 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
-const { schedule } = require('./scheduler');
+const { schedule, simulateDelay } = require('./scheduler');
 
 let db;
 let createCueTx;
@@ -107,7 +107,21 @@ function getCue(id) {
 
 /** 从数据库重建模型并执行排程 */
 function computeSchedule() {
-  const cues = listCues().map((c) => ({
+  const cues = loadCueModels();
+  return schedule(cues);
+}
+
+/**
+ * 延误推演：从数据库读取正式数据，仅在内存中调整起点的最早开始约束后重新排程，
+ * 不写入任何数据。
+ */
+function computeDelaySimulation(cueId, delaySeconds) {
+  return simulateDelay(loadCueModels(), cueId, delaySeconds);
+}
+
+/** 从数据库重建排程器所需的提示点模型 */
+function loadCueModels() {
+  return listCues().map((c) => ({
     id: c.id,
     ref: c.ref,
     title: c.title,
@@ -117,7 +131,6 @@ function computeSchedule() {
     actors: c.actors,
     prerequisites: c.prerequisites,
   }));
-  return schedule(cues);
 }
 
 function createCue(data) {
@@ -237,6 +250,7 @@ module.exports = {
   listCues,
   getCue,
   computeSchedule,
+  computeDelaySimulation,
   createCue,
   updateCue,
   deleteCue,

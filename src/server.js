@@ -33,6 +33,29 @@ app.get('/api/conflicts', (_req, res) => {
   res.json(db.computeSchedule().conflicts);
 });
 
+/**
+ * 延误推演：纯内存计算，不写入数据库。
+ * body: { cueId: number, delay: "10" / "1:30" / 整数秒 ... }（与时长输入一致：纯数字按分钟）
+ */
+app.post('/api/schedule/simulate-delay', (req, res, next) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object') badRequest('请求体必须是 JSON 对象');
+
+    const cueId = Number(body.cueId);
+    if (!Number.isInteger(cueId) || cueId <= 0) badRequest('请选择一个已排程提示点作为延误起点');
+
+    const delay = parseTime(body.delay, { asMinutes: true });
+    if (delay == null || !Number.isFinite(delay) || delay < 0) {
+      badRequest('请填写非负延误量（格式如 5、5:30、1:02:30，纯数字按分钟）');
+    }
+
+    res.json(db.computeDelaySimulation(cueId, delay));
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/api/cues/:id', (req, res) => {
   const cue = db.getCue(Number(req.params.id));
   if (!cue) return res.status(404).json({ error: '提示点不存在' });

@@ -237,6 +237,107 @@ function schedule(inputCues) {
   return { cues: results, cycle, conflicts };
 }
 
+/**
+ * 延误推演（纯内存计算，不修改入参，也不涉及数据库）：
+ * 1. 先用 schedule 得到正式（基线）排程；
+ * 2. 把起点提示点的最早开始约束在内存中提高到「基线计算开始 + delaySeconds」；
+ * 3. 复用同一个 schedule 重新排程、重查超时与演员冲突；
+ * 4. 对比两版结果：受影响提示点（开始/结束发生变化）、新增超时、新增演员冲突。
+ *
+ * 环上或被环阻塞的提示点在基线排程中没有有效时间，不能作为推演起点。
+ */
+function simulateDelay(inputCues, cueId, delaySeconds) {
+  const baseline = schedule(inputCues);
+  const target = baseline.cues.find((c) => c.id === cueId);
+  if (!target) {
+    const err = new Error('提示点不存在');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (!target.scheduled) {
+    const err = new Error('该提示点位于环上或被环阻塞，无法作为延误推演起点');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isFinite(delaySeconds) || delaySeconds < 0) {
+    const err = new Error('延误量必须是非负时间');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const delay = Math.round(delaySeconds);
+  // 仅在内存中提高起点的最早开始约束；起点基线开始已不早于其原 minStart
+  const forcedStart = target.earliestStart + delay;
+  const simulatedInput = inputCues.map((c) =>
+    c.id === cueId ? { ...c, minStart: forcedStart } : c
+  );
+  const simulated = schedule(simulatedInput);
+  const simulatedTarget = simulated.cues.find((c) => c.id === cueId);
+
+  /* ---------- 新增演员冲突：模拟排程中出现、基线排程中没有的同演员同提示点对 ---------- */
+  const conflictKey = (cf) =>
+    `${cf.actor}|${Math.min(cf.cueA.id, cf.cueB.id)}|${Math.max(cf.cueA.id, cf.cueB.id)}`;
+  const baseConflictKeys = new Set(baseline.conflicts.map(conflictKey));
+  const newConflicts = simulated.conflicts.filter((cf) => !baseConflictKeys.has(conflictKey(cf)));
+
+  const newConflictActorsByCue = new Map();
+  for (const cf of newConflicts) {
+    for (const id of [cf.cueA.id, cf.cueB.id]) {
+      if (!newConflictActorsByCue.has(id)) newConflictActorsByCue.set(id, new Set());
+      newConflictActorsByCue.get(id).add(cf.actor);
+    }
+  }
+
+  /* ---------- 受影响提示点：两版均成功排程且开始或结束时间发生变化 ---------- */
+  const baseById = new Map(baseline.cues.map((c) => [c.id, c]));
+  const affected = [];
+  for (const sim of simulated.cues) {
+    const base = baseById.get(sim.id);
+    if (!base || !base.scheduled || !sim.scheduled) continue;
+    const deltaStart = sim.earliestStart - base.earliestStart;
+    const deltaFinish = sim.earliestFinish - base.earliestFinish;
+    if (deltaStart === 0 && deltaFinish === 0) continue;
+    affected.push({
+      id: sim.id,
+      ref: sim.ref,
+      title: sim.title,
+      baseStart: base.earliestStart,
+      baseFinish: base.earliestFinish,
+      simulatedStart: sim.earliestStart,
+      simulatedFinish: sim.earliestFinish,
+      deltaStart,
+      deltaFinish,
+      baseOverdue: !!base.overdue,
+      simulatedOverdue: !!sim.overdue,
+      newOverdue: !base.overdue && !!sim.overdue,
+      newConflictActors: Array.from(newConflictActorsByCue.get(sim.id) || []),
+    });
+  }
+  affected.sort(
+    (a, b) =>
+      a.simulatedStart - b.simulatedStart ||
+      (a.ref || String(a.id)).localeCompare(b.ref || String(b.id), 'zh')
+  );
+
+  return {
+    target: {
+      id: target.id,
+      ref: target.ref,
+      title: target.title,
+      delay,
+      baselineStart: target.earliestStart,
+      baselineFinish: target.earliestFinish,
+      simulatedStart: simulatedTarget ? simulatedTarget.earliestStart : forcedStart,
+      simulatedFinish: simulatedTarget ? simulatedTarget.earliestFinish : null,
+    },
+    baseline,
+    simulated,
+    affected,
+    newOverdue: affected.filter((a) => a.newOverdue),
+    newConflicts,
+  };
+}
+
 /** 冲突条目里引用提示点时只保留展示所需的字段 */
 function conflictCueRef(c) {
   return {
@@ -289,4 +390,4 @@ function findCyclePath(cues, component) {
   return nodes;
 }
 
-module.exports = { schedule };
+module.exports = { schedule, simulateDelay };
